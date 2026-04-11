@@ -106,7 +106,7 @@ OPENAI_API_KEY=your_api_key
 docker run -d ^
   --name postgres-madhav ^
   -e POSTGRES_PASSWORD=postgres ^
-  -e POSTGRES_DB=legal_knowledge_graph ^
+  -e POSTGRES_DB=legal_graph ^
   -p 5432:5432 ^
   postgres:15
 ```
