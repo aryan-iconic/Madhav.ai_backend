@@ -1,0 +1,149 @@
+<!--
+  ════════════════════════════════════════════════════════
+  madhav.ai — Search Enhancements: Integration Guide
+  ════════════════════════════════════════════════════════
+
+
+  FILES YOU GOT:
+  ─────────────
+  1. search_enhancements.py  — core logic (synonyms, parser, query builder)
+  2. search_router.py        — FastAPI endpoints
+  3. search.js               — frontend UI (autocomplete, filters, did-you-mean)
+
+
+  ════════════════════════════════════════════════════════
+  BACKEND SETUP (2 lines in your main app.py)
+  ════════════════════════════════════════════════════════
+
+    from search_router import router as search_router
+    app.include_router(search_router)
+
+  Update these 2 lines at the top of search_router.py:
+    ES_HOST  = "http://localhost:9200"   ← your ES host
+    ES_INDEX = "madhav_cases"            ← your existing case index
+
+
+  ════════════════════════════════════════════════════════
+  FRONTEND SETUP (index.html)
+  ════════════════════════════════════════════════════════
+
+  1. Load search.js after app.js:
+     <script src="search.js"></script>
+
+  2. Your search area needs:
+     - A container div: <div id="search-container"> ... </div>
+     - Your existing search input inside it: <input id="search-input" type="text">
+
+  3. Initialize:
+     <script>
+       document.addEventListener("DOMContentLoaded", function() {
+         MadhavSearch.init("search-container", "search-input");
+       });
+     </script>
+
+  4. Listen for results (plug into your existing result renderer):
+     document.addEventListener("madhav:search-results", function(e) {
+       const { cases, total, pages, suggestion } = e.detail;
+       // ... your existing code to render case cards
+       renderCaseResults(cases);
+     });
+
+
+  ════════════════════════════════════════════════════════
+  API ENDPOINTS CREATED
+  ════════════════════════════════════════════════════════
+
+  POST /api/search/               — main search (all features)
+  GET  /api/search/autocomplete   — ?q=query → suggestions
+  POST /api/search/refine         — search within result set
+  GET  /api/search/filters        — load filter dropdown options
+
+
+  ════════════════════════════════════════════════════════
+  WHAT GETS ADDED TO YOUR SEARCH
+  ════════════════════════════════════════════════════════
+
+  ✅ Synonym expansion
+     "bail" → also searches "anticipatory bail", "section 438 crpc"
+     "cheque bounce" → "section 138 ni act", "dishonour of cheque"
+     50+ legal synonyms built in — add more in search_enhancements.py
+
+  ✅ Boolean parsing
+     fraud AND contract     → both required
+     "breach of contract"   → exact phrase
+     fraud NOT acquittal    → exclude acquittal cases
+     fraud NEAR/5 cheque    → within 5 words
+     fraud*                 → wildcard (fraudster, fraudulent)
+
+  ✅ Spell correction ("Did you mean?")
+     "contrcat" → "contract"  (shown as yellow bar above results)
+     Only fires when results < 3
+
+  ✅ Autocomplete
+     Debounced 300ms. Shows case name + court + year + citation.
+     Highlighted matching text.
+
+  ✅ Advanced filters (all new):
+     - Party name (petitioner / respondent)
+     - Case type (civil / criminal / writ / tax / company / consumer)
+     - Outcome (allowed / dismissed / acquitted / convicted)
+     - Precedent status (good_law / overruled / distinguished / followed)
+     - Bench strength (1 / 2 / 3 / 5 judges)
+     (Court, Judge, Year, Act/Section you already had — now unified)
+
+  ✅ Active filter chips
+     Visual chips show active filters, click × to remove one at a time.
+
+  ✅ Search within results
+     After getting results, click "Search within results" to narrow
+     down only those cases further.
+
+  ✅ Pagination (client-side rendered, up to 10 pages shown)
+
+
+  ════════════════════════════════════════════════════════
+  ES INDEX: RECOMMENDED FIELD MAPPINGS
+  ════════════════════════════════════════════════════════
+
+  For all features to work, your ES index should have these fields.
+  If some are missing, the query degrades gracefully — won't break.
+
+  PUT /madhav_cases/_mapping
+  {
+    "properties": {
+      "case_id":          { "type": "keyword" },
+      "case_name":        { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+      "citation":         { "type": "keyword" },
+      "court":            { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+      "judges":           { "type": "text" },
+      "date_of_judgment": { "type": "date" },
+      "year":             { "type": "integer" },
+      "petitioner":       { "type": "text" },
+      "respondent":       { "type": "text" },
+      "party_names":      { "type": "text" },
+      "acts_sections":    { "type": "text" },
+      "case_type":        { "type": "keyword" },
+      "outcome":          { "type": "keyword" },
+      "precedent_status": { "type": "keyword" },
+      "bench_strength":   { "type": "integer" },
+      "headnotes":        { "type": "text" },
+      "full_text":        { "type": "text" }
+    }
+  }
+
+  IMPORTANT — keyword fields (court, case_type, outcome, precedent_status)
+  must be "keyword" type for aggregations and filter dropdowns to work.
+  If yours are plain "text", add a .keyword sub-field as shown above.
+
+
+  ════════════════════════════════════════════════════════
+  ADDING MORE SYNONYMS (takes 5 minutes, huge impact)
+  ════════════════════════════════════════════════════════
+
+  In search_enhancements.py, add to LEGAL_SYNONYMS:
+
+    "your_term": ["synonym1", "synonym2", "section X act Y"],
+
+  Law students will tell you what they searched and got no results.
+  That's your synonym list — add them after each feedback session.
+-->

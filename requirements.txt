@@ -1,0 +1,42 @@
+# Madhav.AI Backend — Python Dependencies
+# Install: pip install -r requirements.txt
+
+# ── Web Framework ──────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9     # For file uploads
+
+# ── Database ───────────────────────────────────────────────────────
+# Using psycopg2-binary for simplicity; switch to psycopg2 in production
+# psycopg2-binary==2.9.9
+
+# ── Embeddings (Local, Free) ───────────────────────────────────────
+sentence-transformers==3.0.1    # all-MiniLM-L6-v2 (384-dim, same as your DB)
+torch==2.6.0                    # Required by sentence-transformers
+
+# ── LLM (Ollama is a separate install — see below) ─────────────────
+requests==2.32.3            # HTTP calls to Ollama API
+
+# ── Document Parsing (Phase 2) ────────────────────────────────────
+pymupdf==1.24.5             # PDF text extraction (fastest option)
+python-docx==1.1.2          # DOCX text extraction
+
+# ── Utilities ─────────────────────────────────────────────────────
+python-dotenv==1.0.1        # Load .env config file
+numpy==1.26.4               # Array operations
+
+# ── Dev/Testing ───────────────────────────────────────────────────
+httpx==0.27.0               # For testing FastAPI endpoints
+
+# ══════════════════════════════════════════════════════════════════
+# OLLAMA SETUP (run these commands, NOT pip install)
+# ══════════════════════════════════════════════════════════════════
+# 1. Install Ollama:  https://ollama.com/download
+# 2. Pull model:      ollama pull llama3
+# 3. Start server:    ollama serve
+# 4. Test:            curl http://localhost:11434/api/tags
+#
+# Alternative smaller model (faster on low RAM):
+#   ollama pull mistral   (7B, ~4GB RAM)
+#   ollama pull phi3      (3.8B, ~2.5GB RAM) ← use if RAM < 8GB
+# ══════════════════════════════════════════════════════════════════

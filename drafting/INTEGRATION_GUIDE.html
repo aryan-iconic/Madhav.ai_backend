@@ -1,0 +1,126 @@
+<!--
+  ════════════════════════════════════════════════════════
+  madhav.ai — Drafting Engine: index.html integration
+  ════════════════════════════════════════════════════════
+
+  STEP 1: Add this <div> wherever you want the drafting
+  engine to appear in your existing index.html:
+-->
+
+<div id="madhav-drafting"></div>
+
+
+<!--
+  STEP 2: Load drafting.js AFTER your existing app.js:
+-->
+<script src="drafting.js"></script>
+
+
+<!--
+  STEP 3: Initialize (add to your existing DOMContentLoaded
+  block, or in a new <script> tag at bottom of body):
+-->
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    MadhavDrafting.init("madhav-drafting");
+  });
+</script>
+
+
+<!--
+  ════════════════════════════════════════════════════════
+  BACKEND SETUP (app.py / main.py)
+  ════════════════════════════════════════════════════════
+
+  Add these two lines to your existing FastAPI app:
+
+    from drafting_router import router as drafting_router
+    app.include_router(drafting_router)
+
+  Full example:
+
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from drafting_router import router as drafting_router
+
+    app = FastAPI()
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],      # tighten this in production
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(drafting_router)
+
+    # ... rest of your existing routes
+
+
+  ════════════════════════════════════════════════════════
+  OLLAMA SETUP
+  ════════════════════════════════════════════════════════
+
+  If you haven't already:
+    ollama pull llama3
+
+  If you use a different model (e.g. mistral, gemma2),
+  change OLLAMA_MODEL in drafting_router.py line 16:
+    OLLAMA_MODEL = "mistral"
+
+
+  ════════════════════════════════════════════════════════
+  API ENDPOINTS CREATED
+  ════════════════════════════════════════════════════════
+
+  POST /api/draft            — Generate new draft (streaming SSE)
+  POST /api/draft/refine     — Refine existing draft (streaming SSE)
+  GET  /api/draft/templates  — List available templates + sections
+
+
+  ════════════════════════════════════════════════════════
+  WHAT THE UI GIVES YOU
+  ════════════════════════════════════════════════════════
+
+  ✅ 4 document types: Legal Notice, Writ Petition,
+     Bail Application, Affidavit
+
+  ✅ 3 tone modes: Formal / Aggressive / Concise
+
+  ✅ All input fields:
+     - Client / petitioner name
+     - Opposite party
+     - Court + jurisdiction
+     - Acts & sections
+     - Case citations (auto-inserted into draft)
+     - Facts (plain language → formatted legal text)
+     - Relief sought
+
+  ✅ Streaming output (token by token, like ChatGPT)
+
+  ✅ Refine bar with quick chips:
+     "Make more aggressive", "Add verification clause",
+     "Simplify language", "Add more case law", "Make concise"
+
+  ✅ Copy to clipboard
+
+  ✅ Export to PDF (browser print dialog, formatted)
+
+  ✅ Clear / reset
+
+
+  ════════════════════════════════════════════════════════
+  ADDING TO YOUR NAVIGATION (optional)
+  ════════════════════════════════════════════════════════
+
+  If you have a nav/tab system in app.js, add a tab called
+  "Draft" that shows/hides #madhav-drafting. Example:
+
+    function showTab(tab) {
+      document.querySelectorAll(".tab-content").forEach(el => el.style.display = "none");
+      document.getElementById(tab).style.display = "block";
+    }
+
+    // Add to your nav HTML:
+    // <button onclick="showTab('madhav-drafting')">✍️ Draft</button>
+-->
