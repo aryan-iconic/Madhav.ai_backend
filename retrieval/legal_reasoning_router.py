@@ -437,9 +437,18 @@ async def counter_arguments(case_id: str, force_regenerate: bool = False):
 
         ctx  = await fetch_case_core(conn, case_id)
         args = await fetch_cached_arguments(conn, case_id)
-
-    finally:
+    except HTTPException:
         await conn.close()
+        raise
+    except Exception as e:
+        await conn.close()
+        log.error(f"[COUNTER-ARGS] Error fetching case: {e}")
+        return JSONResponse({"petitioner_weaknesses": [], "respondent_weaknesses": [], "overall_assessment": {}, "error": str(e), "cached": False, "done": False}, status_code=500)
+    finally:
+        try:
+            await conn.close()
+        except:
+            pass
 
     case_text = _compact_case_text(ctx)
     prompt    = _build_counter_args_prompt(case_text, args)
@@ -505,9 +514,18 @@ async def case_strategy(case_id: str, req: StrategyRequest, force_regenerate: bo
 
         ctx  = await fetch_case_core(conn, case_id)
         args = await fetch_cached_arguments(conn, case_id)
-
-    finally:
+    except HTTPException:
         await conn.close()
+        raise
+    except Exception as e:
+        await conn.close()
+        log.error(f"[STRATEGY] Error fetching case: {e}")
+        return JSONResponse({"side": side, "error": str(e), "cached": False, "done": False}, status_code=500)
+    finally:
+        try:
+            await conn.close()
+        except:
+            pass
 
     case_text = _compact_case_text(ctx)
     prompt    = _build_strategy_prompt(case_text, args, side)
@@ -568,9 +586,18 @@ async def fact_law_separation(case_id: str, force_regenerate: bool = False):
                 return JSONResponse({**cached, 'cached': True, 'done': True})
 
         ctx = await fetch_case_core(conn, case_id)
-
-    finally:
+    except HTTPException:
         await conn.close()
+        raise
+    except Exception as e:
+        await conn.close()
+        log.error(f"[FACT-LAW] Error fetching case: {e}")
+        return JSONResponse({"classifications": [], "fact_law_summary": {}, "error": str(e), "cached": False, "done": False}, status_code=500)
+    finally:
+        try:
+            await conn.close()
+        except:
+            pass
 
     # Build a compact case header (no paragraphs — they go in the prompt separately)
     c = ctx["case"]

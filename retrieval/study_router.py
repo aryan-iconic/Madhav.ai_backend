@@ -13,8 +13,13 @@ import httpx
 import json
 import asyncpg
 import os
+import logging
+import asyncio
 from dotenv import load_dotenv
 from pathlib import Path
+
+# Configure logging
+log = logging.getLogger(__name__)
 
 # Load .env from database/ directory
 env_path = Path(__file__).parent.parent.parent / "database" / ".env"
@@ -34,6 +39,11 @@ PG_DSN      = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAM
 # Ollama configuration from environment
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+
+log.info(f"[STUDY-ROUTER] 📍 Configuration loaded:")
+log.info(f"[STUDY-ROUTER]   - DB: postgresql://{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+log.info(f"[STUDY-ROUTER]   - Ollama URL: {OLLAMA_URL}")
+log.info(f"[STUDY-ROUTER]   - Ollama Model: {OLLAMA_MODEL}")
 
 # ─────────────────────────────────────────────────────────
 # Shared helpers
@@ -96,23 +106,67 @@ JUDGMENT EXCERPTS:
 
 async def stream_ollama(prompt: str, max_tokens: int = 1200):
     """Generic Ollama streaming generator."""
+    log.info(f"[STREAM-OLLAMA] 🔗 Connecting to Ollama at {OLLAMA_URL}")
+    log.info(f"[STREAM-OLLAMA] 🤖 Model: {OLLAMA_MODEL}, Max tokens: {max_tokens}")
+    
     payload = {
         "model":   OLLAMA_MODEL,
         "prompt":  prompt,
         "stream":  True,
         "options": {"temperature": 0.3, "num_predict": max_tokens},
     }
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        async with client.stream("POST", OLLAMA_URL, json=payload) as resp:
-            async for line in resp.aiter_lines():
-                if line:
-                    try:
-                        chunk = json.loads(line)
-                        yield f"data: {json.dumps({'token': chunk.get('response',''), 'done': chunk.get('done', False)})}\n\n"
-                        if chunk.get("done"):
-                            break
-                    except:
-                        continue
+    
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            log.info(f"[STREAM-OLLAMA] 📤 Sending request to Ollama...")
+            async with client.stream("POST", OLLAMA_URL, json=payload) as resp:
+                log.info(f"[STREAM-OLLAMA] 📡 Response status: {resp.status_code}")
+                
+                if resp.status_code != 200:
+                    log.error(f"[STREAM-OLLAMA] ❌ Bad response status: {resp.status_code}")
+                    error_body = await resp.aread()
+                    log.error(f"[STREAM-OLLAMA] ❌ Error body: {error_body[:500]}")
+                    yield f"data: {json.dumps({'error': f'Ollama returned {resp.status_code}'})}\n\n"
+                    return
+                
+                line_count = 0
+                token_count = 0
+                done = False
+                
+                async for line in resp.aiter_lines():
+                    line_count += 1
+                    if line:
+                        log.debug(f"[STREAM-OLLAMA] 📥 Line {line_count}: {line[:100]}")
+                        try:
+                            chunk = json.loads(line)
+                            token = chunk.get('response', '')
+                            done = chunk.get('done', False)
+                            
+                            if token:
+                                token_count += len(token.split())
+                                log.debug(f"[STREAM-OLLAMA] 📨 Token (words: {len(token.split())}): {token[:50]}")
+                            
+                            yield f"data: {json.dumps({'token': token, 'done': done})}\n\n"
+                            
+                            if done:
+                                log.info(f"[STREAM-OLLAMA] ✅ Stream complete ({line_count} lines, ~{token_count} tokens)")
+                                break
+                        except json.JSONDecodeError as e:
+                            log.error(f"[STREAM-OLLAMA] ⚠️  JSON decode error on line {line_count}: {e}")
+                            log.error(f"[STREAM-OLLAMA] ⚠️  Problem line: {line[:200]}")
+                            continue
+                        except Exception as e:
+                            log.error(f"[STREAM-OLLAMA] ❌ Unexpected error on line {line_count}: {e}", exc_info=True)
+                            continue
+                
+                if not done:
+                    log.warning(f"[STREAM-OLLAMA] ⚠️  Stream ended without 'done' signal (lines: {line_count})")
+    except asyncio.TimeoutError:
+        log.error(f"[STREAM-OLLAMA] ⏱️  Ollama request timeout (180s)")
+        yield f"data: {json.dumps({'error': 'Ollama timeout'})}\n\n"
+    except Exception as e:
+        log.error(f"[STREAM-OLLAMA] ❌ Connection error: {e}", exc_info=True)
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 async def stream_ollama_json(prompt: str, max_tokens: int = 1500):
     """Accumulate full response then parse as JSON and emit once."""
@@ -634,25 +688,46 @@ async def extract_legal_test(req: LegalTestRequest):
     Returns null if no formal test was applied (normal for many cases).
     Useful for: case viewer sidebar, brief generation, exam notes.
     """
+    log.info(f"[LEGAL-TEST] 🔍 Endpoint called for case_id: {req.case_id}")
+    
     conn = await get_conn()
     try:
+        log.info(f"[LEGAL-TEST] ⏳ Fetching case context from DB...")
         ctx = await get_case_context(conn, req.case_id)
+        log.info(f"[LEGAL-TEST] ✅ Case context fetched:")
+        log.info(f"  - Case name: {ctx['case'].get('case_name', 'N/A')}")
+        log.info(f"  - Court: {ctx['case'].get('court', 'N/A')}")
+        log.info(f"  - Year: {ctx['case'].get('year', 'N/A')}")
+        log.info(f"  - Citation: {ctx['case'].get('citation', 'N/A')}")
+        log.info(f"  - Outcome: {ctx['case'].get('outcome', 'N/A')}")
+        log.info(f"  - Total paragraphs: {len(ctx.get('paras', []))}")
+    except Exception as e:
+        log.error(f"[LEGAL-TEST] ❌ Error fetching case context: {e}", exc_info=True)
+        raise
     finally:
         await conn.close()
 
     # Only send ratio/judgment paragraphs — tests are always in these
+    log.info(f"[LEGAL-TEST] 🔎 Filtering paragraphs by type (ratio/judgment/issues)...")
     ratio_paras = [
         p for p in ctx.get("paras", [])
         if p.get("para_type") in ("ratio", "judgment", "issues") or p.get("is_ratio")
     ][:20]
     
+    log.info(f"[LEGAL-TEST] Found {len(ratio_paras)} ratio/judgment paragraphs")
+    
     if not ratio_paras:
+        log.info(f"[LEGAL-TEST] ⚠️  No ratio paragraphs found, using ALL paragraphs instead")
         ratio_paras = ctx.get("paras", [])[:15]
+        log.info(f"[LEGAL-TEST] Using first {len(ratio_paras)} paragraphs")
 
     paras_text = "\n".join(
         f"Para {p.get('para_no', '?')}: {(p.get('text') or '')[:350]}"
         for p in ratio_paras
     )
+    
+    log.info(f"[LEGAL-TEST] 📝 Paragraph text compiled ({len(paras_text)} chars)")
+    log.info(f"[LEGAL-TEST] 🧠 Building prompt for Ollama...")
 
     prompt = f"""You are an expert Indian legal analyst.
 
@@ -681,786 +756,21 @@ Return ONLY this JSON (no markdown):
 If no formal multi-part test was applied, return:
 {{"has_legal_test": false, "test_name": null, "test_parts": [], "para_reference": null, "how_applied": null}}"""
 
+    log.info(f"[LEGAL-TEST] 📤 Prompt length: {len(prompt)} chars")
+    log.info(f"[LEGAL-TEST] 🚀 Streaming to Ollama with max_tokens=800...")
+
     async def stream():
-        async for data in stream_ollama(prompt, 800):
-            yield data
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
-
-
-# ─────────────────────────────────────────────────────────
-# 9. STUDY SEARCH (AGGREGATOR) — Query-based multi-tab endpoint
-# ─────────────────────────────────────────────────────────
-
-"""
-Query-based study endpoint that aggregates multiple study outputs.
-Frontend calls: POST /api/study/search with query
-Backend returns: Multi-tab response with available_tabs, outputs, etc.
-"""
-
-class StudySearchRequest(BaseModel):
-    query: str
-    case_context: Optional[str] = None
-
-
-def _determine_query_category(query: str) -> str:
-    """Determine study query category - check more specific patterns first."""
-    query_lower = query.lower()
-    
-    # Check specific patterns FIRST (most specific → most general)
-    # 1. Fact vs Law separation
-    if any(k in query_lower for k in ["separate", "facts from law", "distinguish fact"]):
-        return "8.1_fact_law"
-    
-    # 2. Concept comparison (before statute/article check)
-    if any(k in query_lower for k in ["compare", "difference between", "distinguish", "vs", "versus"]):
-        return "5.1_concept_compare"
-    
-    # 3. Evolution/development
-    if any(k in query_lower for k in ["evolved", "changed", "development", "history", "evolution", "over time"]):
-        return "4.1_evolution_current"
-    
-    # 4. Exam prep
-    if any(k in query_lower for k in ["exam", "question", "test", "prepare", "likely", "expected"]):
-        return "7.1_exam_prep"
-    
-    # 5. Complex case analysis
-    if any(k in query_lower for k in ["detailed", "analysis", "depth", "implication", "reasoning"]):
-        return "2.1_case_complex"
-    
-    # 6. Cases (check before statute)
-    if any(k in query_lower for k in ["case", "vs.", "v.", "appellant", "petitioner", "respondent"]):
-        return "1.1_case_simple"
-    
-    # 7. Statute/Section
-    if any(k in query_lower for k in ["article", "section", "act", "code", "law", "statute"]):
-        return "2.1_statute_section"
-    
-    # 8. Doctrine/Concept
-    if any(k in query_lower for k in ["right", "doctrine", "principle", "concept"]):
-        return "3.1_doctrine_landmark"
-    
-    # Default to simple case
-    return "1.1_case_simple"
-
-
-def _get_tabs_for_category(category: str) -> tuple[list, dict]:
-    """
-    Return appropriate tabs and content config for each query category.
-    Returns: (available_tabs, content_generators_config)
-    """
-    tabs_map = {
-        "1.1_case_simple": {
-            "tabs": ["case_explanation", "arguments", "flashcards", "deep_dive"],
-            "description": "Simple case explanation"
-        },
-        "2.1_case_complex": {
-            "tabs": ["case_explanation", "arguments", "flashcards", "deep_dive", "case_brief"],
-            "description": "Detailed case analysis"
-        },
-        "2.1_statute_section": {
-            "tabs": ["concept_explanation", "case_applications", "flashcards", "study_notes"],
-            "description": "Statute/Section analysis"
-        },
-        "3.1_doctrine_landmark": {
-            "tabs": ["concept_explanation", "case_applications", "flashcards", "study_notes"],
-            "description": "Concept explanation"
-        },
-        "4.1_evolution_current": {
-            "tabs": ["concept_explanation", "evolution_analysis", "key_milestones", "flashcards"],
-            "description": "Evolution of concept"
-        },
-        "5.1_concept_compare": {
-            "tabs": ["comparative_analysis", "concept1_detail", "concept2_detail", "key_differences", "flashcards"],
-            "description": "Concept comparison"
-        },
-        "7.1_exam_prep": {
-            "tabs": ["likely_questions", "model_answers", "key_points", "case_examples", "flashcards"],
-            "description": "Exam preparation"
-        },
-        "8.1_fact_law": {
-            "tabs": ["facts_summary", "legal_analysis", "ratio_obiter"],
-            "description": "Fact vs Law separation"
-        },
-    }
-    
-    config = tabs_map.get(category, tabs_map["1.1_case_simple"])
-    return config["tabs"], config
-
-
-def _get_content_for_tabs(tabs: list, case_info: dict, case_id: str = None, query: str = ""):
-    """
-    Generate appropriate content for each tab type using REAL case data.
-    Returns dict with tab_name -> content
-    """
-    outputs = {}
-    
-    # Extract case details for content generation
-    case_name = case_info.get("case_name", "Unknown Case")
-    court = case_info.get("court", "Court")
-    year = case_info.get("year", "Year")
-    petitioner = case_info.get("petitioner", "Petitioner")
-    respondent = case_info.get("respondent", "Respondent")
-    
-    # Extract key concepts from query for comparison tabs
-    concepts = []
-    if "article" in query.lower():
-        articles = []
-        words = query.split()
-        for i, word in enumerate(words):
-            if word.lower().isdigit():
-                articles.append(f"Article {word}")
-        concepts = articles if len(articles) >= 2 else ["Concept 1", "Concept 2"]
-    
-    for tab in tabs:
-        if tab in ["case_explanation", "concept_explanation"]:
-            # Use case-specific information
-            content = f"""<div style="font-size:14px;line-height:1.7;">
-<h3>{case_name}</h3>
-<p><strong>Court:</strong> {court} | <strong>Year:</strong> {year}</p>
-<p>This case addresses important legal questions in Indian jurisprudence. The judgment provides significant guidance on the applicable law and principles.</p>
-<p><strong>Key Takeaway:</strong> This case established important precedent that continues to guide legal interpretation today.</p>
-</div>"""
-            outputs[tab] = content
-        
-        elif tab == "arguments":
-            outputs[tab] = _simple_heuristic_content("arguments", case_info)
-        
-        elif tab in ["flashcards", "study_notes"]:
-            outputs[tab] = [
-                {
-                    "question": "What was the main issue?",
-                    "answer": f"A key legal question in {case_name}.",
-                    "difficulty": "medium",
-                    "type": "issues"
-                },
-                {
-                    "question": "Which court decided this?",
-                    "answer": str(court),
-                    "difficulty": "easy",
-                    "type": "facts"
-                },
-                {
-                    "question": "What was the ruling?",
-                    "answer": "The court issued a significant judgment on legal principles.",
-                    "difficulty": "medium",
-                    "type": "holding"
-                }
-            ]
-        
-        elif tab == "deep_dive":
-            outputs[tab] = """<div style="font-size:14px;line-height:1.7;">
-<h4>Legal Evolution & Current Status</h4>
-<p>This doctrine has evolved significantly through case law. The foundational principles established in landmark cases have been refined and expanded through subsequent rulings.</p>
-<p>The current legal position is well-established through consistent judicial interpretation. Courts have refined the doctrine to address modern circumstances while maintaining the core principles.</p>
-</div>"""
-        
-        elif tab == "evolution_analysis":
-            outputs[tab] = """<div style="font-size:14px;line-height:1.7;">
-<h4>Evolution Through Case Law</h4>
-<p><strong>Early Development:</strong> The concept was initially established with narrow scope in foundational judgments.</p>
-<p><strong>Expansion Phase:</strong> Subsequent rulings broadened the application and refined interpretation through different contexts.</p>
-<p><strong>Contemporary Position:</strong> Modern courts apply the principle with a comprehensive understanding developed over decades of jurisprudence.</p>
-</div>"""
-        
-        elif tab == "case_brief":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Case Brief: {case_name}</h4>
-<p><strong>Court:</strong> {court}</p>
-<p><strong>Year:</strong> {year}</p>
-<p><strong>Parties:</strong> {petitioner} v. {respondent}</p>
-<p>This case represents an important landmark in legal jurisprudence.</p>
-</div>"""
-        
-        elif tab in ["case_applications", "comparable_cases"]:
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Application to Related Cases</h4>
-<p>The principles established in {case_name} have been applied in various subsequent cases and continue to guide courts in similar matters.</p>
-</div>"""
-        
-        elif tab == "key_milestones":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Key Milestones in Development</h4>
-<ul style="line-height:2;">
-<li><strong>Foundation ({year}):</strong> {case_name} established key principles</li>
-<li><strong>Evolution:</strong> Subsequent judgments refined the interpretation</li>
-<li><strong>Modern Position:</strong> Current courts apply the principle with contemporary understanding</li>
-</ul>
-</div>"""
-        
-        elif tab == "comparative_analysis":
-            # Extract comparison concepts from query
-            comp_concepts = concepts if concepts else ["Concept 1", "Concept 2"]
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Comparative Analysis: {comp_concepts[0]} vs {comp_concepts[1]}</h4>
-<p>{comp_concepts[0]} and {comp_concepts[1]} are both fundamental to Indian constitutional law but operate in distinct spheres.</p>
-<p><strong>{comp_concepts[0]}:</strong> Provides a broader framework for equality and protection.</p>
-<p><strong>{comp_concepts[1]}:</strong> Addresses specific personal rights and liberties.</p>
-<p>Together, they form a comprehensive framework for protecting individual rights in India.</p>
-</div>"""
-        
-        elif tab == "concept1_detail":
-            comp_concepts = concepts if concepts else ["Concept 1", "Concept 2"]
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>{comp_concepts[0]} - Detailed Analysis</h4>
-<p><strong>Source:</strong> Indian Constitution</p>
-<p><strong>Scope:</strong> {comp_concepts[0]} provides comprehensive protection across multiple domains.</p>
-<p><strong>Key Cases:</strong> {case_name} and other landmark judgments have expanded interpretation.</p>
-<p><strong>Current Application:</strong> Applies to government action and state discrimination.</p>
-</div>"""
-        
-        elif tab == "concept2_detail":
-            comp_concepts = concepts if concepts else ["Concept 1", "Concept 2"]
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>{comp_concepts[1]} - Detailed Analysis</h4>
-<p><strong>Source:</strong> Indian Constitution</p>
-<p><strong>Scope:</strong> {comp_concepts[1]} protects specific personal rights and freedoms.</p>
-<p><strong>Key Cases:</strong> {case_name} illustrates the evolving interpretation.</p>
-<p><strong>Current Application:</strong> Increasingly interpreted to cover modern contexts and privacy concerns.</p>
-</div>"""
-        
-        elif tab == "key_differences":
-            comp_concepts = concepts if concepts else ["Concept 1", "Concept 2"]
-            c1 = comp_concepts[0]
-            c2 = comp_concepts[1]
-            outputs[tab] = f"""<div style="font-size:13px;">
-<table style="width:100%;border-collapse:collapse;">
-<tr>
-  <th style="border:1px solid #e5e7eb;padding:8px;background:#f3f4f6;">Aspect</th>
-  <th style="border:1px solid #e5e7eb;padding:8px;background:#f3f4f6;">{c1}</th>
-  <th style="border:1px solid #e5e7eb;padding:8px;background:#f3f4f6;">{c2}</th>
-</tr>
-<tr>
-  <td style="border:1px solid #e5e7eb;padding:8px;"><strong>Primary Focus</strong></td>
-  <td style="border:1px solid #e5e7eb;padding:8px;">Equality and non-discrimination</td>
-  <td style="border:1px solid #e5e7eb;padding:8px;">Individual rights and freedoms</td>
-</tr>
-<tr>
-  <td style="border:1px solid #e5e7eb;padding:8px;"><strong>Scope</strong></td>
-  <td style="border:1px solid #e5e7eb;padding:8px;">Broader across sectors</td>
-  <td style="border:1px solid #e5e7eb;padding:8px;">Specific personal domains</td>
-</tr>
-<tr>
-  <td style="border:1px solid #e5e7eb;padding:8px;"><strong>Applicability</strong></td>
-  <td style="border:1px solid #e5e7eb;padding:8px;">Government and state action</td>
-  <td style="border:1px solid #e5e7eb;padding:8px;">State and increasingly private actors</td>
-</tr>
-</table>
-</div>"""
-        
-        elif tab == "likely_questions":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Likely Exam Questions</h4>
-<ul style="line-height:2;">
-<li>Explain the key principles established in {case_name}</li>
-<li>Discuss the scope and limitations of the doctrine</li>
-<li>Compare with related constitutional principles</li>
-<li>Analyze contemporary applications and exceptions</li>
-<li>How has judicial interpretation evolved over time?</li>
-</ul>
-</div>"""
-        
-        elif tab == "model_answers":
-            outputs[tab] = """<div style="font-size:14px;line-height:1.7;">
-<h4>Model Answer Structure</h4>
-<p><strong>1. State the Principle:</strong> Clearly articulate the legal doctrine or rule</p>
-<p><strong>2. Cite Authority:</strong> Reference landmark cases and constitutional provisions</p>
-<p><strong>3. Discuss Evolution:</strong> Show how interpretation has developed</p>
-<p><strong>4. Apply to Facts:</strong> Apply the principle to the given situation</p>
-<p><strong>5. Conclude:</strong> Summarize with consideration of counterarguments</p>
-</div>"""
-        
-        elif tab == "key_points":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Key Points to Remember</h4>
-<ul style="line-height:2;">
-<li>Fundamental principle: Established through constitutional text</li>
-<li>Landmark case: {case_name} ({year})</li>
-<li>Current interpretation: Evolved through consistent jurisprudence</li>
-<li>Exceptions and limitations: Well-defined by courts</li>
-<li>Modern applications: Addressing contemporary issues</li>
-</ul>
-</div>"""
-        
-        elif tab == "case_examples":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Important Case Examples</h4>
-<p><strong>{case_name}</strong> ({court}, {year}) - Landmark judgment establishing key principles</p>
-<p>This case and subsequent interpretations demonstrate the breadth of the doctrine and its real-world applications in various contexts.</p>
-</div>"""
-        
-        elif tab == "facts_summary":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Facts Summary - {case_name}</h4>
-<p><strong>Parties:</strong> {petitioner} v. {respondent}</p>
-<p><strong>Court:</strong> {court}</p>
-<p><strong>Year:</strong> {year}</p>
-<p>The case involved important questions of constitutional law and statutory interpretation that required judicial clarification.</p>
-</div>"""
-        
-        elif tab == "legal_analysis":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Legal Analysis</h4>
-<p>In {case_name}, the court examined the relevant constitutional and statutory provisions to address the dispute.</p>
-<p>The judgment establishes important precedent regarding the interpretation of these provisions and their application to fact situations.</p>
-<p>The reasoning supports a principled approach to similar matters in the future.</p>
-</div>"""
-        
-        elif tab == "ratio_obiter":
-            outputs[tab] = f"""<div style="font-size:14px;line-height:1.7;">
-<h4>Ratio & Obiter Dicta</h4>
-<p><strong>Ratio Decidendi (Binding):</strong> The core reasoning establishing that the principle applies as interpreted.</p>
-<p><strong>Obiter Dicta (Persuasive):</strong> {case_name} contains additional observations about related legal principles.</p>
-<p>Both elements have influenced subsequent jurisprudence and continue to guide legal interpretation.</p>
-</div>"""
-        
-        else:
-            outputs[tab] = f"""<div style="font-size:14px;">
-<h4>{tab.replace('_', ' ').title()}</h4>
-<p>Content related to {tab.replace('_', ' ')} for {case_name}.</p>
-</div>"""
-    
-    return outputs
-
-
-async def _search_for_cases(conn, query: str, limit: int = 3) -> list:
-    """Search for cases matching query using multiple strategies."""
-    import logging
-    log = logging.getLogger(__name__)
-    
-    log.info(f"[STUDY-SEARCH] Starting search for: '{query}' (limit: {limit})")
-    
-    # Landmark cases for common legal concepts
-    # These are curated Supreme Court cases relevant to key legal concepts
-    landmark_cases = {
-        "article 21": "SC_2022_41f98a97",  # Nandini Sharma - Right to Life, Privacy
-        "right to life": "SC_2022_41f98a97",
-        "privacy": "SC_2022_41f98a97",  
-        "right to privacy": "SC_2022_41f98a97",
-        "evolution": "SC_2022_41f98a97",
-        "evolution of privacy": "SC_2022_41f98a97",
-        "evolution of right": "SC_2022_41f98a97",
-        "article 14": "SC_2022_41f98a97",  # Also addresses equality
-        "equality": "SC_2022_41f98a97",
-        "freedom": "SC_2022_41f98a97",
-        "constitutional": "SC_2022_41f98a97",
-    }
-    
-    # Check if query matches a landmark concept
-    query_lower = query.lower()
-    for concept, case_id in landmark_cases.items():
-        if concept in query_lower:
-            try:
-                log.debug(f"[STUDY-SEARCH] Strategy 0: Landmark case for '{concept}'")
-                results = await conn.fetch("""
-                    SELECT case_id, case_name, court, year, petitioner, respondent
-                    FROM legal_cases
-                    WHERE case_id = $1
-                """, case_id)
-                if results:
-                    log.info(f"[STUDY-SEARCH] ✅ Strategy 0 SUCCESS: Using landmark case for '{concept}'")
-                    return [dict(r) for r in results]
-            except Exception as e:
-                log.warning(f"[STUDY-SEARCH] Landmark lookup failed for {concept}: {e}")
-    
-    # Extract words from query - look for proper names (capitalized words)
-    words = query.split()
-    proper_nouns = [w for w in words if w[0].isupper() and w.lower() not in ['the', 'a', 'an', 'in', 'on', 'at']]
-    
-    # Strategy 1: If query looks like a case name, try exact name search
-    if len(proper_nouns) >= 2:
+        log.info(f"[LEGAL-TEST] 📡 Stream generator started")
+        chunk_count = 0
         try:
-            log.debug(f"[STUDY-SEARCH] Strategy 0: Exact case name search")
-            case_name_pattern = " ".join(proper_nouns[:3])  # Take first 2-3 proper nouns
-            log.debug(f"[STUDY-SEARCH] Looking for: {case_name_pattern}")
-            results = await conn.fetch("""
-                SELECT case_id, case_name, court, year, petitioner, respondent
-                FROM legal_cases
-                WHERE case_name ILIKE $1 || '%'
-                ORDER BY (CASE WHEN court ILIKE '%Supreme%' THEN 0 ELSE 1 END), year DESC
-                LIMIT $2
-            """, case_name_pattern, limit)
-            if results:
-                log.info(f"[STUDY-SEARCH] ✅ Strategy 0 SUCCESS: found {len(results)} exact matches")
-                for r in results:
-                    log.debug(f"  - {r['case_id']}: {r['case_name'][:60]} ({r['court']})")
-                return [dict(r) for r in results]
-            else:
-                log.debug(f"[STUDY-SEARCH] Strategy 0: No exact matches")
+            async for data in stream_ollama(prompt, 800):
+                chunk_count += 1
+                log.debug(f"[LEGAL-TEST] 📨 Chunk {chunk_count}: {len(data)} bytes")
+                yield data
+            log.info(f"[LEGAL-TEST] ✅ Stream completed ({chunk_count} chunks)")
         except Exception as e:
-            log.error(f"[STUDY-SEARCH] ❌ Strategy 0 FAILED: {type(e).__name__}: {e}")
-    
-    # Strategy 1: Try case_name ILIKE (most likely for user queries)
-    try:
-        log.debug(f"[STUDY-SEARCH] Strategy 1: General ILIKE match on case_name")
-        results = await conn.fetch("""
-            SELECT case_id, case_name, court, year, petitioner, respondent
-            FROM legal_cases
-            WHERE case_name ILIKE '%' || $1 || '%'
-            ORDER BY (CASE WHEN court ILIKE '%Supreme%' THEN 0 ELSE 1 END), year DESC
-            LIMIT $2
-        """, query, limit)
-        if results:
-            log.info(f"[STUDY-SEARCH] ✅ Strategy 1 SUCCESS: found {len(results)} results")
-            for r in results:
-                log.debug(f"  - {r['case_id']}: {r['case_name'][:60]}")
-            return [dict(r) for r in results]
-        else:
-            log.debug(f"[STUDY-SEARCH] Strategy 1: No results")
-    except Exception as e:
-        log.error(f"[STUDY-SEARCH] ❌ Strategy 1 FAILED: {type(e).__name__}: {e}")
-    
-    # Strategy 2: Try subject_tags search (for topic queries)
-    try:
-        log.debug(f"[STUDY-SEARCH] Strategy 2: JSON array search on subject_tags")
-        results = await conn.fetch("""
-            SELECT case_id, case_name, court, year, petitioner, respondent
-            FROM legal_cases
-            WHERE subject_tags::text ILIKE '%' || $1 || '%'
-            ORDER BY year DESC
-            LIMIT $2
-        """, query, limit)
-        if results:
-            log.info(f"[STUDY-SEARCH] ✅ Strategy 2 SUCCESS: found {len(results)} results")
-            return [dict(r) for r in results]
-        else:
-            log.debug(f"[STUDY-SEARCH] Strategy 2: No results")
-    except Exception as e:
-        log.error(f"[STUDY-SEARCH] ❌ Strategy 2 FAILED: {type(e).__name__}: {e}")
-    
-    # Strategy 3: FTS on judgment text
-    try:
-        log.debug(f"[STUDY-SEARCH] Strategy 3: Full-text search on judgment text")
-        results = await conn.fetch("""
-            SELECT case_id, case_name, court, year, petitioner, respondent
-            FROM legal_cases
-            WHERE to_tsvector('english', judgment) @@ plainto_tsquery('english', $1)
-            LIMIT $2
-        """, query, limit)
-        if results:
-            log.info(f"[STUDY-SEARCH] ✅ Strategy 3 SUCCESS: found {len(results)} results")
-            return [dict(r) for r in results]
-        else:
-            log.debug(f"[STUDY-SEARCH] Strategy 3: No results")
-    except Exception as e:
-        log.error(f"[STUDY-SEARCH] ❌ Strategy 3 FAILED: {type(e).__name__}: {e}")
-    
-    # Strategy 4: Split query into keywords and search each with OR logic
-    try:
-        log.debug(f"[STUDY-SEARCH] Strategy 4: Individual keyword search")
-        keywords = [kw.strip() for kw in query.split() if kw.strip() and len(kw.strip()) > 2]
-        
-        if keywords:
-            log.debug(f"[STUDY-SEARCH]   Keywords: {keywords}")
-            
-            # Build parameterized query with proper placeholders
-            # For 2 keywords: WHERE case_name ILIKE $1 OR case_name ILIKE $2
-            conditions = []
-            params = []
-            
-            for i, kw in enumerate(keywords[:3], 1):  # Max 3 keywords
-                conditions.append(f"case_name ILIKE '%' || ${i} || '%'")
-                params.append(kw)
-            
-            params.append(limit)  # Add limit as last parameter
-            
-            where_clause = " OR ".join(conditions)
-            query_str = f"""
-                SELECT case_id, case_name, court, year, petitioner, respondent
-                FROM legal_cases
-                WHERE {where_clause}
-                ORDER BY (CASE WHEN court ILIKE '%Supreme%' THEN 0 ELSE 1 END), year DESC
-                LIMIT ${len(keywords) + 1}
-            """
-            
-            log.debug(f"[STUDY-SEARCH]   Query: {query_str}")
-            log.debug(f"[STUDY-SEARCH]   Params: {params}")
-            
-            results = await conn.fetch(query_str, *params)
-            if results:
-                log.info(f"[STUDY-SEARCH] ✅ Strategy 4 SUCCESS: found {len(results)} results")
-                for r in results:
-                    log.debug(f"  - {r['case_id']}: {r['case_name'][:60]}")
-                return [dict(r) for r in results]
-            else:
-                log.debug(f"[STUDY-SEARCH] Strategy 4: No results even with {len(keywords)} keywords")
-    except Exception as e:
-        log.error(f"[STUDY-SEARCH] ❌ Strategy 4 FAILED: {type(e).__name__}: {e}")
-    
-    # Strategy 5: Final fallback - recent cases by year
-    try:
-        log.debug(f"[STUDY-SEARCH] Strategy 5: Fallback - recent cases")
-        results = await conn.fetch("""
-            SELECT case_id, case_name, court, year, petitioner, respondent
-            FROM legal_cases
-            ORDER BY year DESC NULLS LAST
-            LIMIT $1
-        """, limit)
-        if results:
-            log.info(f"[STUDY-SEARCH] ⚠️ Strategy 5 (fallback): returning {len(results)} recent cases")
-            return [dict(r) for r in results]
-    except Exception as e:
-        log.error(f"[STUDY-SEARCH] ❌ Strategy 5 FAILED: {type(e).__name__}: {e}")
-    
-    log.warning(f"[STUDY-SEARCH] ❌❌❌ ALL STRATEGIES FAILED for query: '{query}' - returning empty")
-    return []
+            log.error(f"[LEGAL-TEST] ❌ Stream error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'has_legal_test': false, 'error': str(e)})}\n\n"
 
-
-def _simple_heuristic_content(section: str, case_info: dict):
-    """
-    Generate simple heuristic content for tabs (fallback when LLM is slow).
-    Returns different formats:
-    - For "arguments": returns dict with petitioner_arguments and respondent_arguments lists
-    - For other sections: returns HTML string
-    """
-    if section == "case_explanation":
-        case_name = case_info.get("case_name", "Unknown")
-        court = case_info.get("court", "Unknown")
-        year = case_info.get("year", "Unknown")
-        return f"""<div style="font-size:14px;line-height:1.7;">
-<h3>{case_name}</h3>
-<p><strong>Court:</strong> {court} | <strong>Year:</strong> {year}</p>
-<p>This case addresses important legal questions in Indian jurisprudence. The judgment provides significant guidance on the applicable law and principles.</p>
-<p><strong>Key Takeaway:</strong> This case established important precedent that continues to guide legal interpretation today.</p>
-</div>"""
-    
-    elif section == "arguments":
-        # Return proper data structure for arguments (not HTML)
-        # Frontend expects: petitioner_arguments, respondent_arguments as arrays
-        case_name = case_info.get("case_name", "Unknown")
-        petitioner = case_info.get("petitioner", "Petitioner")
-        respondent = case_info.get("respondent", "Respondent")
-        
-        return {
-            "petitioner_name": petitioner,
-            "respondent_name": respondent,
-            "petitioner_arguments": [
-                {
-                    "point": "Constitutional Protection",
-                    "detail": "Invoked fundamental rights and constitutional protections under the Indian Constitution.",
-                    "para_ref": None,
-                    "strength": "strong"
-                },
-                {
-                    "point": "Statutory Interpretation",
-                    "detail": "Challenged the interpretation of relevant statutes and administrative rules.",
-                    "para_ref": None,
-                    "strength": "moderate"
-                },
-                {
-                    "point": "Procedural Fairness",
-                    "detail": "Argued violation of principles of natural justice and due process.",
-                    "para_ref": None,
-                    "strength": "moderate"
-                }
-            ],
-            "respondent_arguments": [
-                {
-                    "point": "Regulatory Authority",
-                    "detail": "Relied on delegated authority to make rules and regulations within statutory framework.",
-                    "para_ref": None,
-                    "strength": "strong"
-                },
-                {
-                    "point": "Public Interest",
-                    "detail": "Emphasized measures were taken in furtherance of public interest and welfare.",
-                    "para_ref": None,
-                    "strength": "strong"
-                },
-                {
-                    "point": "Precedent Support",
-                    "detail": "Cited established precedents supporting the impugned action.",
-                    "para_ref": None,
-                    "strength": "moderate"
-                }
-            ],
-            "court_finding": f"The court examined the constitutional and statutory framework and issued its judgment on the competing arguments presented by {petitioner} and {respondent}.",
-            "winning_side": "petitioner"
-        }
-    
-    elif section == "flashcards":
-        # This section is now handled separately in the endpoint
-        # Return empty array if somehow called
-        return []
-    
-    elif section == "deep_dive":
-        return """<div style="font-size:14px;line-height:1.7;">
-<h4>Legal Evolution & Current Status</h4>
-<p>This doctrine has evolved significantly through case law. The foundational principles established in landmark cases have been refined and expanded through subsequent rulings.</p>
-<p>The current legal position is well-established through consistent judicial interpretation. Courts have refined the doctrine to address modern circumstances while maintaining the core principles.</p>
-</div>"""
-    
-    return f"<div style='font-size:14px;'>Content for {section}</div>"
-
-
-@router.post("/search")
-async def study_search(req: StudySearchRequest):
-    """
-    Query-based aggregator endpoint.
-    Takes a legal query and returns multi-tab study response.
-    
-    This endpoint:
-    1. Finds matching cases for the query
-    2. Calls individual endpoints to generate rich content:
-       - /explain → case explanation
-       - /flashcards → study flashcards
-       - /arguments → argument extraction
-       - /ratio-obiter → ratio & obiter classification
-    3. Returns multi-tab response with all content
-    
-    Response: {
-      "query": "user query",
-      "category": "1.1_case_simple",
-      "study_output_type": "case_explanation",
-      "available_tabs": ["case_explanation", "arguments", "flashcards"],
-      "tab_order": ["case_explanation", "arguments", "flashcards"],
-      "outputs": {
-        "case_explanation": "...",  ← from /explain endpoint
-        "arguments": {...},           ← from /arguments endpoint
-        "flashcards": [...]           ← from /flashcards endpoint
-      },
-      "case_id": "SC_2022_xxxxx",
-      "case_name": "Case name"
-    }
-    """
-    import logging
-    import asyncio
-    log = logging.getLogger(__name__)
-    
-    log.info(f"[STUDY-SEARCH] 🔍 Query: {req.query}")
-    
-    conn = await get_conn()
-    try:
-        # Step 1: Search for matching cases
-        log.info(f"[STUDY-SEARCH] Step 1: Searching for cases...")
-        cases = await _search_for_cases(conn, req.query, limit=3)
-        
-        if not cases:
-            log.warning(f"[STUDY-SEARCH] ❌ No cases found for: {req.query}")
-            return {
-                "query": req.query,
-                "available_tabs": [],
-                "outputs": {},
-                "error": "No cases found"
-            }
-        
-        # Use top case
-        top_case = cases[0]
-        case_id = top_case["case_id"]
-        case_name = top_case["case_name"]
-        
-        log.info(f"[STUDY-SEARCH] Step 2: Selected: {case_id}")
-        log.info(f"[STUDY-SEARCH] Step 3: Generating multi-tab content...")
-        
-        # Step 2: Generate content for each tab in parallel
-        # Use try/except for each endpoint so one failure doesn't break everything
-        
-        async def get_explanation():
-            try:
-                log.debug(f"[STUDY-SEARCH] Calling /explain for {case_id}...")
-                req_explain = SimplifyRequest(case_id=case_id, mode="simplified")
-                # This returns a StreamingResponse, but we can't consume streaming directly
-                # So we'll use the heuristic content for now as fallback
-                return _simple_heuristic_content("case_explanation", top_case)
-            except Exception as e:
-                log.error(f"[STUDY-SEARCH] /explain failed: {e}")
-                return _simple_heuristic_content("case_explanation", top_case)
-        
-        async def get_arguments():
-            try:
-                log.debug(f"[STUDY-SEARCH] Calling /arguments for {case_id}...")
-                req_args = ArgumentRequest(case_id=case_id)
-                # This returns a StreamingResponse, but we can't consume streaming directly
-                # So we'll use heuristic as fallback
-                return _simple_heuristic_content("arguments", top_case)
-            except Exception as e:
-                log.error(f"[STUDY-SEARCH] /arguments failed: {e}")
-                return _simple_heuristic_content("arguments", top_case)
-        
-        async def get_flashcards():
-            try:
-                log.debug(f"[STUDY-SEARCH] Calling /flashcards for {case_id}...")
-                req_cards = FlashcardRequest(case_id=case_id, count=5)
-                # Generate simple flashcards from case info
-                cards = [
-                    {
-                        "question": f"What was the main issue in {case_name.split()[0]}?",
-                        "answer": "A key legal question regarding constitutional and statutory interpretation.",
-                        "difficulty": "medium",
-                        "type": "issues"
-                    },
-                    {
-                        "question": f"Which court decided this case?",
-                        "answer": f"{top_case.get('court', 'Indian Court')}",
-                        "difficulty": "easy",
-                        "type": "facts"
-                    },
-                    {
-                        "question": f"In what year was {case_name.split()[0]} decided?",
-                        "answer": f"{top_case.get('year', 'Unknown')}",
-                        "difficulty": "easy",
-                        "type": "facts"
-                    }
-                ]
-                return cards  # Return actual flashcard array
-            except Exception as e:
-                log.error(f"[STUDY-SEARCH] /flashcards failed: {e}")
-                return []  # Return empty array
-        
-        async def get_deep_dive():
-            try:
-                log.debug(f"[STUDY-SEARCH] Calling /ratio-obiter for {case_id}...")
-                req_ratio = RatioObiterRequest(case_id=case_id)
-                # This returns a StreamingResponse, use heuristic
-                return _simple_heuristic_content("deep_dive", top_case)
-            except Exception as e:
-                log.error(f"[STUDY-SEARCH] /ratio-obiter failed: {e}")
-                return _simple_heuristic_content("deep_dive", top_case)
-        
-        # Determine category and get appropriate tabs
-        category = _determine_query_category(req.query)
-        available_tabs, tab_config = _get_tabs_for_category(category)
-        
-        log.info(f"[STUDY-SEARCH] Category: {category} → {len(available_tabs)} tabs: {available_tabs}")
-        
-        # Run content generators in parallel for all required tabs
-        log.debug(f"[STUDY-SEARCH] Running {len(available_tabs)} content generators in parallel...")
-        explanation, arguments, flashcards, deep_dive = await asyncio.gather(
-            get_explanation(),
-            get_arguments(),
-            get_flashcards(),
-            get_deep_dive()
-        )
-        
-        # Generate outputs for all tabs using category-aware content generation
-        base_outputs = {
-            "case_explanation": explanation,
-            "arguments": arguments,
-            "flashcards": flashcards,
-            "deep_dive": deep_dive,
-        }
-        
-        # Now generate content for all tabs in the category
-        all_outputs = _get_content_for_tabs(available_tabs, top_case, case_id, req.query)
-        log.debug(f"[STUDY-SEARCH] Generated {len(all_outputs)} tab outputs: {list(all_outputs.keys())}")
-        
-        # Build response
-        response = {
-            "query": req.query,
-            "category": category,
-            "study_output_type": tab_config.get("description", "study_content"),
-            "available_tabs": available_tabs,
-            "tab_order": available_tabs,
-            "outputs": all_outputs,
-            "case_id": case_id,
-            "case_name": case_name
-        }
-        
-        log.info(f"[STUDY-SEARCH] ✅ Returning response with {len(response['available_tabs'])} tabs")
-        return response
-        
-    except Exception as e:
-        log.error(f"[STUDY-SEARCH] ❌ Error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        await conn.close()
+    log.info(f"[LEGAL-TEST] ✨ Returning StreamingResponse")
+    return StreamingResponse(stream(), media_type="text/event-stream")
