@@ -46,6 +46,7 @@ from Backend.retrieval.study_router import router as study_router
 from Backend.retrieval.arguments_router import router as arguments_router
 from Backend.retrieval.legal_reasoning_router import router as reasoning_router
 from Backend.precedent.precedent_router import router as precedent_router
+from Backend.boolean.router import router as boolean_router
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -96,6 +97,9 @@ app.include_router(reasoning_router)
 
 # Include precedent intelligence router (Day 2 — precedent status & citation context)
 app.include_router(precedent_router)
+
+# Include boolean search router (legal query operators + relevance ranking)
+app.include_router(boolean_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
